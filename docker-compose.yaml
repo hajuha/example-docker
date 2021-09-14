@@ -1,0 +1,141 @@
+version: "3.7"
+
+services:
+  cassandra:
+    image: cassandra:3.11.2
+    container_name: cassandra
+    expose:
+      - 7000
+      - 7001
+      - 7199
+      - 9042
+      - 9160
+    ports:
+      - "9042:9042"
+    environment:
+      - "MAX_HEAP_SIZE=256M"
+      - "HEAP_NEWSIZE=128M"
+    restart: always
+    volumes:
+      - cassandra_data:/casvol
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "cqlsh",
+          "-u cassandra",
+          "-p cassandra",
+          "-e describe keyspaces",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+  cassandra-web:
+    image: markusgulden/cassandra-web
+    depends_on:
+      - cassandra
+    environment:
+      CASSANDRA_HOST: 127
+      CASSANDRA_PORT: 9042
+      CASSANDRA_USER: cassandra
+      CASSANDRA_PASSWORD: cassandra
+    ports:
+      - 3000:3000
+
+  sanic-zoo:
+    image: zookeeper:3.4.9
+    hostname: sanic-zoo
+    container_name: sanic-zoo
+    restart: unless-stopped
+    ports:
+      - "${ZOO_KEEPER_PORT}:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_PORT: 2181
+      ZOO_SERVERS: server.1=sanic-zoo:2888:3888
+    volumes:
+      - "${VOLUME_FOLDER}/zoo/data:/data"
+      - "${VOLUME_FOLDER}/zoo/datalog:/datalog"
+    networks:
+      - sanic-kafka
+
+  sanic-kafka:
+    image: confluentinc/cp-kafka:5.5.0
+    hostname: sanic-kafka
+    container_name: sanic-kafka
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_PORT}:9092"
+      - "9093"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://sanic-kafka:9093, EXTERNAL://localhost:9092
+      KAFKA_LISTENERS: INTERNAL://:9093,EXTERNAL://:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: sanic-zoo:2181
+      KAFKA_BROKER_ID: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - "${VOLUME_FOLDER}/kafka:/var/lib/kafka/data"
+    depends_on:
+      - sanic-zoo
+    networks:
+      - sanic-kafka
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: sanic
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: sanic-kafka:9093
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_ZOOKEEPER: sanic-zoo:2181
+    depends_on:
+      - sanic-kafka
+      - schema-registry
+    networks:
+      - sanic-kafka
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:6.0.1
+    hostname: schema-registry
+    container_name: schema-registry
+    restart: on-failure
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: sanic-kafka:9093 # Kafka Broker
+    depends_on:
+      - sanic-zoo
+      - sanic-kafka
+    ports:
+      - "${SCHEMA_REGISTRY_PORT}:8081"
+    networks:
+      - sanic-kafka
+
+  sanic-rest-proxy:
+    image: confluentinc/cp-kafka-rest:6.1.0
+    container_name: rest-proxy
+    hostname: rest-proxy
+    restart: unless-stopped
+    depends_on:
+      - sanic-kafka
+      - schema-registry
+    ports:
+      - "${KAFKA_REST_PROXY_PORT}:8082"
+    environment:
+      KAFKA_REST_HOST_NAME: rest-proxy
+      KAFKA_REST_LISTENERS: http://0.0.0.0:8082
+      KAFKA_REST_BOOTSTRAP_SERVERS: sanic-kafka:9093
+      KAFKA_REST_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    networks:
+      - sanic-kafka
+
+networks:
+  sanic-kafka:
+    driver: bridge
+volumes:
+  cassandra_data:
+    driver: local
